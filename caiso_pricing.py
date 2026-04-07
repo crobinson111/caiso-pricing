@@ -416,19 +416,21 @@ function renderSectionData(day, market, allRows) {
   document.getElementById(refId).textContent = dateStr(d) + ' | Refreshed: ' + now.toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles'}) + ' PT';
 }
 
-loadAll();
+document.addEventListener("DOMContentLoaded", function() {
+  loadAll();
 
-// Auto-refresh today sections at top of each hour
-function scheduleRefresh() {
-  var now  = nowPT();
-  var next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours()+1, 0, 0);
-  setTimeout(function() {
-    loadSection('today', 'rtm');
-    loadSection('today', 'hasp');
-    scheduleRefresh();
-  }, next - now);
-}
-scheduleRefresh();
+  // Auto-refresh today sections at top of each hour
+  function scheduleRefresh() {
+    var now  = nowPT();
+    var next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours()+1, 0, 0);
+    setTimeout(function() {
+      loadSection('today', 'rtm');
+      loadSection('today', 'hasp');
+      scheduleRefresh();
+    }, next - now);
+  }
+  scheduleRefresh();
+});
 </script>
 </body>
 </html>"""
