@@ -2,8 +2,8 @@
 CAISO LMP Pricing Dashboard - Yesterday RTM Only
 =================================================
 Fetches yesterday's RTM 5-min LMP for ELAP_PACE-APND.
-Data is cached in background on startup.
-Browser polls every 10 seconds until ready.
+Data is fetched on first request and cached in memory.
+Subsequent requests return instantly from cache.
 
 Requirements: requests, flask, gunicorn
 Start: gunicorn caiso_pricing:app --timeout 300
@@ -15,7 +15,6 @@ import sys
 import time
 import zipfile
 import traceback
-import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -30,7 +29,8 @@ TZ_UTC    = ZoneInfo("UTC")
 
 app = Flask(__name__)
 
-_cache = {"yesterday_rtm": None}
+_cache = {"data": None, "fetching": False}
+
 
 @app.after_request
 def add_cors(response):
@@ -78,36 +78,45 @@ def fetch_hour(hr, date_pt):
     return []
 
 
-def warm_cache():
-    try:
-        print("warm_cache started", flush=True)
-        now_pt    = datetime.now(tz=TZ_PT)
-        yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        print("Yesterday date: " + str(yesterday), flush=True)
-        all_rows  = []
-        for hr in range(24):
-            try:
-                rows = fetch_hour(hr, yesterday)
-                all_rows.extend(rows)
-                print("Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
-            except Exception as e:
-                print("Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
-            time.sleep(10)
-        _cache["yesterday_rtm"] = all_rows
-        print("Cache ready! Total rows: " + str(len(all_rows)), flush=True)
-    except Exception:
-        print("WARM CACHE CRASHED:", flush=True)
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-
-threading.Thread(target=warm_cache, daemon=True).start()
+def fetch_all():
+    now_pt    = datetime.now(tz=TZ_PT)
+    yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    all_rows  = []
+    print("Fetching yesterday RTM...", flush=True)
+    for hr in range(24):
+        try:
+            rows = fetch_hour(hr, yesterday)
+            all_rows.extend(rows)
+            print("Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
+        except Exception as e:
+            print("Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
+        time.sleep(10)
+    print("Done! " + str(len(all_rows)) + " total rows.", flush=True)
+    return all_rows
 
 
 @app.route("/data")
 def data():
-    if _cache["yesterday_rtm"] is None:
+    # Return from cache if ready
+    if _cache["data"] is not None:
+        return jsonify(_cache["data"])
+
+    # If already fetching, tell browser to wait
+    if _cache["fetching"]:
         return jsonify({"error": "still_loading"}), 503
-    return jsonify(_cache["yesterday_rtm"])
+
+    # First request — fetch now (this request will wait ~4 min then return)
+    _cache["fetching"] = True
+    try:
+        result = fetch_all()
+        _cache["data"] = result
+        _cache["fetching"] = False
+        return jsonify(result)
+    except Exception:
+        _cache["fetching"] = False
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        return jsonify({"error": "fetch_failed"}), 500
 
 
 @app.route("/")
@@ -171,7 +180,7 @@ def dashboard():
 </div>
 
 <div class="table-wrap">
-  <div id="table"><div class="status"><span class="spinner"></span> Server is fetching data from CAISO... please wait (~4 min on first load).</div></div>
+  <div id="table"><div class="status"><span class="spinner"></span> Fetching data from CAISO... please wait (~4 min on first load).</div></div>
 </div>
 
 <script>
@@ -192,14 +201,16 @@ function ensureChart(cb) {
 
 function load() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  document.getElementById("subtitle").textContent = "Fetching...";
+
   fetch("/data")
     .then(function(resp) {
       return resp.json().then(function(d) { return {status: resp.status, data: d}; });
     })
     .then(function(result) {
       if (result.status === 503) {
-        document.getElementById("subtitle").textContent = "Server warming up... checking again in 10s";
-        pollTimer = setTimeout(load, 10000);
+        document.getElementById("subtitle").textContent = "Server is fetching CAISO data... checking again in 15s";
+        pollTimer = setTimeout(load, 15000);
         return;
       }
       render(result.data);
