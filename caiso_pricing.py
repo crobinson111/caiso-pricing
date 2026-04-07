@@ -86,7 +86,7 @@ def fetch_hours(label, date_pt, num_hours):
             print("  " + label + " Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
         except Exception as e:
             print("  " + label + " Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
-        time.sleep(10)
+        time.sleep(5)
     print(label + " done: " + str(len(all_rows)) + " rows", flush=True)
     return all_rows
 
