@@ -1,9 +1,8 @@
 """
-CAISO LMP Pricing Dashboard - Yesterday RTM Only
-=================================================
-Fetches yesterday's RTM 5-min LMP for ELAP_PACE-APND.
+CAISO LMP Pricing Dashboard - Yesterday RTM + Today RTM
+========================================================
+Fetches RTM 5-min LMP for ELAP_PACE-APND.
 Data is fetched on first request and cached in memory.
-Subsequent requests return instantly from cache.
 
 Requirements: requests, flask, gunicorn
 Start: gunicorn caiso_pricing:app --timeout 300
@@ -29,8 +28,10 @@ TZ_UTC    = ZoneInfo("UTC")
 
 app = Flask(__name__)
 
-_cache = {"data": None, "fetching": False}
-
+_cache = {
+    "yesterday": {"data": None, "fetching": False},
+    "today":     {"data": None, "fetching": False},
+}
 
 @app.after_request
 def add_cors(response):
@@ -78,14 +79,12 @@ def fetch_hour(hr, date_pt):
     return []
 
 
-def fetch_all():
-    now_pt    = datetime.now(tz=TZ_PT)
-    yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    all_rows  = []
-    print("Fetching yesterday RTM...", flush=True)
-    for hr in range(24):
+def fetch_hours(label, date_pt, num_hours):
+    all_rows = []
+    print("Fetching " + label + "...", flush=True)
+    for hr in range(num_hours):
         try:
-            rows = fetch_hour(hr, yesterday)
+            rows = fetch_hour(hr, date_pt)
             all_rows.extend(rows)
             print("Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
         except Exception as e:
@@ -95,25 +94,46 @@ def fetch_all():
     return all_rows
 
 
-@app.route("/data")
-def data():
-    # Return from cache if ready
-    if _cache["data"] is not None:
-        return jsonify(_cache["data"])
-
-    # If already fetching, tell browser to wait
-    if _cache["fetching"]:
+@app.route("/data/yesterday")
+def data_yesterday():
+    c = _cache["yesterday"]
+    if c["data"] is not None:
+        return jsonify(c["data"])
+    if c["fetching"]:
         return jsonify({"error": "still_loading"}), 503
-
-    # First request — fetch now (this request will wait ~4 min then return)
-    _cache["fetching"] = True
+    c["fetching"] = True
     try:
-        result = fetch_all()
-        _cache["data"] = result
-        _cache["fetching"] = False
+        now_pt    = datetime.now(tz=TZ_PT)
+        yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        result    = fetch_hours("Yesterday RTM", yesterday, 24)
+        c["data"]     = result
+        c["fetching"] = False
         return jsonify(result)
     except Exception:
-        _cache["fetching"] = False
+        c["fetching"] = False
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        return jsonify({"error": "fetch_failed"}), 500
+
+
+@app.route("/data/today")
+def data_today():
+    c = _cache["today"]
+    if c["data"] is not None:
+        return jsonify(c["data"])
+    if c["fetching"]:
+        return jsonify({"error": "still_loading"}), 503
+    c["fetching"] = True
+    try:
+        now_pt   = datetime.now(tz=TZ_PT)
+        today_pt = now_pt.replace(hour=0, minute=0, second=0, microsecond=0)
+        hours    = now_pt.hour
+        result   = fetch_hours("Today RTM", today_pt, hours)
+        c["data"]     = result
+        c["fetching"] = False
+        return jsonify(result)
+    except Exception:
+        c["fetching"] = False
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
         return jsonify({"error": "fetch_failed"}), 500
@@ -126,14 +146,16 @@ def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CAISO RTM LMP - Yesterday | ELAP_PACE-APND</title>
+<title>CAISO RTM LMP | ELAP_PACE-APND</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, sans-serif; background: #f0f4f8; color: #222; }
   .header {
     background: #1F4E79; color: #fff; padding: 16px 24px;
     display: flex; align-items: center; justify-content: space-between;
+    margin-top: 24px;
   }
+  .header:first-of-type { margin-top: 0; }
   .header h1 { font-size: 18px; }
   .header .meta { font-size: 12px; opacity: .75; text-align: right; }
   .cards { display: flex; gap: 16px; padding: 20px 24px; flex-wrap: wrap; }
@@ -155,37 +177,52 @@ def dashboard():
   .status { text-align: center; padding: 60px; color: #666; font-size: 15px; }
   .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #ccc; border-top-color: #1F4E79; border-radius: 50%; animation: spin .8s linear infinite; margin-right: 10px; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .divider { height: 8px; background: #1F4E79; opacity: 0.3; margin-top: 24px; }
 </style>
 </head>
 <body>
 
+<!-- Today RTM -->
+<div class="header">
+  <div>
+    <h1>RTM 5-Min LMP - Today So Far | ELAP_PACE-APND</h1>
+    <div class="meta" id="today-subtitle">Loading...</div>
+  </div>
+  <div><button onclick="loadSection('today')" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
+</div>
+<div class="cards">
+  <div class="card"><div class="label">Latest</div><div class="value" id="today-cLatest">-</div></div>
+  <div class="card"><div class="label">High</div><div class="value pos" id="today-cHigh">-</div></div>
+  <div class="card"><div class="label">Low</div><div class="value neg" id="today-cLow">-</div></div>
+  <div class="card"><div class="label">Avg</div><div class="value" id="today-cAvg">-</div></div>
+  <div class="card"><div class="label">Hours</div><div class="value" id="today-cHours">-</div></div>
+</div>
+<div class="chart-wrap"><canvas id="today-chart" height="180"></canvas></div>
+<div class="table-wrap"><div id="today-table"><div class="status"><span class="spinner"></span> Fetching data from CAISO...</div></div></div>
+
+<div class="divider"></div>
+
+<!-- Yesterday RTM -->
 <div class="header">
   <div>
     <h1>RTM 5-Min LMP - Yesterday | ELAP_PACE-APND</h1>
-    <div class="meta" id="subtitle">Loading...</div>
+    <div class="meta" id="yesterday-subtitle">Loading...</div>
   </div>
-  <div><button onclick="load()" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
+  <div><button onclick="loadSection('yesterday')" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
 </div>
-
 <div class="cards">
-  <div class="card"><div class="label">High</div><div class="value pos" id="cHigh">-</div></div>
-  <div class="card"><div class="label">Low</div><div class="value neg" id="cLow">-</div></div>
-  <div class="card"><div class="label">Avg</div><div class="value" id="cAvg">-</div></div>
-  <div class="card"><div class="label">On-Peak Avg</div><div class="value" id="cOnPeak">-</div></div>
-  <div class="card"><div class="label">Off-Peak Avg</div><div class="value" id="cOffPeak">-</div></div>
+  <div class="card"><div class="label">High</div><div class="value pos" id="yesterday-cHigh">-</div></div>
+  <div class="card"><div class="label">Low</div><div class="value neg" id="yesterday-cLow">-</div></div>
+  <div class="card"><div class="label">Avg</div><div class="value" id="yesterday-cAvg">-</div></div>
+  <div class="card"><div class="label">On-Peak Avg</div><div class="value" id="yesterday-cOnPeak">-</div></div>
+  <div class="card"><div class="label">Off-Peak Avg</div><div class="value" id="yesterday-cOffPeak">-</div></div>
 </div>
-
-<div class="chart-wrap">
-  <canvas id="chart" height="180"></canvas>
-</div>
-
-<div class="table-wrap">
-  <div id="table"><div class="status"><span class="spinner"></span> Fetching data from CAISO... please wait (~4 min on first load).</div></div>
-</div>
+<div class="chart-wrap"><canvas id="yesterday-chart" height="180"></canvas></div>
+<div class="table-wrap"><div id="yesterday-table"><div class="status"><span class="spinner"></span> Fetching data from CAISO...</div></div></div>
 
 <script>
-var chartObj = null;
-var pollTimer = null;
+var charts = {};
+var polls  = {};
 
 function nowPT() {
   return new Date(new Date().toLocaleString("en-US", {timeZone:"America/Los_Angeles"}));
@@ -199,30 +236,12 @@ function ensureChart(cb) {
   document.head.appendChild(s);
 }
 
-function load() {
-  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-  document.getElementById("subtitle").textContent = "Fetching...";
+function renderSection(day, allRows) {
+  var isToday = day === "today";
+  var prefix  = day;
 
-  fetch("/data")
-    .then(function(resp) {
-      return resp.json().then(function(d) { return {status: resp.status, data: d}; });
-    })
-    .then(function(result) {
-      if (result.status === 503) {
-        document.getElementById("subtitle").textContent = "Server is fetching CAISO data... checking again in 15s";
-        pollTimer = setTimeout(load, 15000);
-        return;
-      }
-      render(result.data);
-    })
-    .catch(function(e) {
-      document.getElementById("table").innerHTML = '<div class="status">Error: ' + e.message + ' <button onclick="load()">Retry</button></div>';
-    });
-}
-
-function render(allRows) {
   if (!allRows || !allRows.length) {
-    document.getElementById("table").innerHTML = '<div class="status">No data returned.</div>';
+    document.getElementById(prefix + "-table").innerHTML = '<div class="status">No data returned.</div>';
     return;
   }
 
@@ -247,21 +266,27 @@ function render(allRows) {
     el.className = "value " + (v >= 0 ? "pos" : "neg");
   }
 
-  setCard("cHigh", Math.max.apply(null, lmps));
-  setCard("cLow",  Math.min.apply(null, lmps));
-  document.getElementById("cAvg").textContent     = "$" + (sum(lmps)/lmps.length).toFixed(2);
-  document.getElementById("cOnPeak").textContent  = onPeak.length  ? "$" + (sum(onPeak)/onPeak.length).toFixed(2)   : "-";
-  document.getElementById("cOffPeak").textContent = offPeak.length ? "$" + (sum(offPeak)/offPeak.length).toFixed(2) : "-";
+  setCard(prefix + "-cHigh", Math.max.apply(null, lmps));
+  setCard(prefix + "-cLow",  Math.min.apply(null, lmps));
+  document.getElementById(prefix + "-cAvg").textContent = "$" + (sum(lmps)/lmps.length).toFixed(2);
 
-  var now  = nowPT();
-  var yest = new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
-  document.getElementById("subtitle").textContent =
-    yest.toLocaleDateString("en-US") + " | Loaded: " + now.toLocaleTimeString("en-US", {timeZone:"America/Los_Angeles"}) + " PT";
+  if (isToday) {
+    setCard(prefix + "-cLatest", lmps[lmps.length - 1]);
+    document.getElementById(prefix + "-cHours").textContent = new Set(rows.map(function(r){return r.hr;})).size;
+  } else {
+    document.getElementById(prefix + "-cOnPeak").textContent  = onPeak.length  ? "$" + (sum(onPeak)/onPeak.length).toFixed(2)   : "-";
+    document.getElementById(prefix + "-cOffPeak").textContent = offPeak.length ? "$" + (sum(offPeak)/offPeak.length).toFixed(2) : "-";
+  }
+
+  var now = nowPT();
+  var d   = isToday ? now : new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
+  document.getElementById(prefix + "-subtitle").textContent =
+    d.toLocaleDateString("en-US") + " | Loaded: " + now.toLocaleTimeString("en-US", {timeZone:"America/Los_Angeles"}) + " PT";
 
   ensureChart(function() {
-    if (chartObj) chartObj.destroy();
+    if (charts[prefix]) charts[prefix].destroy();
     var colors = lmps.map(function(v) { return v >= 0 ? "rgba(26,107,47,0.8)" : "rgba(185,28,28,0.8)"; });
-    chartObj = new Chart(document.getElementById("chart").getContext("2d"), {
+    charts[prefix] = new Chart(document.getElementById(prefix + "-chart").getContext("2d"), {
       type: "bar",
       data: { labels: rows.map(function(r){return r.timePT;}), datasets: [{ label: "LMP ($/MWh)", data: lmps, backgroundColor: colors, borderWidth: 0 }] },
       options: {
@@ -289,10 +314,34 @@ function render(allRows) {
            '</td><td class="'+(max<0?"neg":"pos")+'">'+max.toFixed(4)+'</td></tr>';
   });
   tbl += '</tbody></table>';
-  document.getElementById("table").innerHTML = tbl;
+  document.getElementById(prefix + "-table").innerHTML = tbl;
 }
 
-document.addEventListener("DOMContentLoaded", load);
+function loadSection(day) {
+  if (polls[day]) { clearTimeout(polls[day]); polls[day] = null; }
+  document.getElementById(day + "-subtitle").textContent = "Fetching...";
+
+  fetch("/data/" + day)
+    .then(function(resp) {
+      return resp.json().then(function(d) { return {status: resp.status, data: d}; });
+    })
+    .then(function(result) {
+      if (result.status === 503) {
+        document.getElementById(day + "-subtitle").textContent = "Fetching from CAISO... checking again in 15s";
+        polls[day] = setTimeout(function() { loadSection(day); }, 15000);
+        return;
+      }
+      renderSection(day, result.data);
+    })
+    .catch(function(e) {
+      document.getElementById(day + "-table").innerHTML = '<div class="status">Error: ' + e.message + ' <button onclick="loadSection(\'' + day + '\')">Retry</button></div>';
+    });
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  loadSection("today");
+  loadSection("yesterday");
+});
 </script>
 </body>
 </html>"""
