@@ -11,8 +11,10 @@ Start: gunicorn caiso_pricing:app --timeout 300
 
 import io
 import re
+import sys
 import time
 import zipfile
+import traceback
 import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -77,20 +79,26 @@ def fetch_hour(hr, date_pt):
 
 
 def warm_cache():
-    now_pt    = datetime.now(tz=TZ_PT)
-    yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    all_rows  = []
-    print("Fetching yesterday RTM...")
-    for hr in range(24):
-        try:
-            rows = fetch_hour(hr, yesterday)
-            all_rows.extend(rows)
-            print(f"  Hour {hr:02d}: {len(rows)} rows")
-        except Exception as e:
-            print(f"  Hour {hr:02d}: SKIPPED ({e})")
-        time.sleep(10)
-    _cache["yesterday_rtm"] = all_rows
-    print(f"Yesterday RTM ready! {len(all_rows)} total rows.")
+    try:
+        print("warm_cache started", flush=True)
+        now_pt    = datetime.now(tz=TZ_PT)
+        yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        print("Yesterday date: " + str(yesterday), flush=True)
+        all_rows  = []
+        for hr in range(24):
+            try:
+                rows = fetch_hour(hr, yesterday)
+                all_rows.extend(rows)
+                print("Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
+            except Exception as e:
+                print("Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
+            time.sleep(10)
+        _cache["yesterday_rtm"] = all_rows
+        print("Cache ready! Total rows: " + str(len(all_rows)), flush=True)
+    except Exception:
+        print("WARM CACHE CRASHED:", flush=True)
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
 
 threading.Thread(target=warm_cache, daemon=True).start()
 
@@ -163,7 +171,7 @@ def dashboard():
 </div>
 
 <div class="table-wrap">
-  <div id="table"><div class="status"><span class="spinner"></span> Server is fetching data from CAISO... this takes a few minutes on first load.</div></div>
+  <div id="table"><div class="status"><span class="spinner"></span> Server is fetching data from CAISO... please wait (~4 min on first load).</div></div>
 </div>
 
 <script>
@@ -186,7 +194,7 @@ function load() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   fetch("/data")
     .then(function(resp) {
-      return resp.json().then(function(data) { return {status: resp.status, data: data}; });
+      return resp.json().then(function(d) { return {status: resp.status, data: d}; });
     })
     .then(function(result) {
       if (result.status === 503) {
@@ -230,16 +238,15 @@ function render(allRows) {
 
   setCard("cHigh", Math.max.apply(null, lmps));
   setCard("cLow",  Math.min.apply(null, lmps));
-  document.getElementById("cAvg").textContent    = "$" + (sum(lmps)/lmps.length).toFixed(2);
+  document.getElementById("cAvg").textContent     = "$" + (sum(lmps)/lmps.length).toFixed(2);
   document.getElementById("cOnPeak").textContent  = onPeak.length  ? "$" + (sum(onPeak)/onPeak.length).toFixed(2)   : "-";
   document.getElementById("cOffPeak").textContent = offPeak.length ? "$" + (sum(offPeak)/offPeak.length).toFixed(2) : "-";
 
-  var now = nowPT();
+  var now  = nowPT();
   var yest = new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
   document.getElementById("subtitle").textContent =
     yest.toLocaleDateString("en-US") + " | Loaded: " + now.toLocaleTimeString("en-US", {timeZone:"America/Los_Angeles"}) + " PT";
 
-  // Chart
   ensureChart(function() {
     if (chartObj) chartObj.destroy();
     var colors = lmps.map(function(v) { return v >= 0 ? "rgba(26,107,47,0.8)" : "rgba(185,28,28,0.8)"; });
@@ -258,7 +265,6 @@ function render(allRows) {
     });
   });
 
-  // Table
   var byHr = {};
   rows.forEach(function(r) { if (!byHr[r.hr]) byHr[r.hr]=[]; byHr[r.hr].push(r.lmp); });
   var tbl = '<table><thead><tr><th>Oper Hour</th><th>Avg ($/MWh)</th><th>Min</th><th>Max</th></tr></thead><tbody>';
