@@ -87,7 +87,7 @@ def fetch_today(market, query):
             print(f"  [{market} Today] Hour {hr:02d}: {len(rows)} rows")
         except Exception as e:
             print(f"  [{market} Today] Hour {hr:02d}: SKIPPED ({e})")
-        time.sleep(10)
+        time.sleep(5)
     return all_rows
 
 
