@@ -1,8 +1,8 @@
 """
 CAISO LMP Pricing Dashboard - Yesterday RTM + Today RTM
 ========================================================
-Fetches RTM 5-min LMP for ELAP_PACE-APND.
-Data is fetched on first request and cached in memory.
+Single /data endpoint fetches yesterday then today sequentially.
+One worker handles one long request, caches result, returns instantly after.
 
 Requirements: requests, flask, gunicorn
 Start: gunicorn caiso_pricing:app --timeout 300
@@ -28,10 +28,7 @@ TZ_UTC    = ZoneInfo("UTC")
 
 app = Flask(__name__)
 
-_cache = {
-    "yesterday": {"data": None, "fetching": False},
-    "today":     {"data": None, "fetching": False},
-}
+_cache = {"data": None, "fetching": False}
 
 @app.after_request
 def add_cors(response):
@@ -81,59 +78,46 @@ def fetch_hour(hr, date_pt):
 
 def fetch_hours(label, date_pt, num_hours):
     all_rows = []
-    print("Fetching " + label + "...", flush=True)
+    print("Fetching " + label + " (" + str(num_hours) + " hours)...", flush=True)
     for hr in range(num_hours):
         try:
             rows = fetch_hour(hr, date_pt)
             all_rows.extend(rows)
-            print("Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
+            print("  " + label + " Hour " + str(hr) + ": " + str(len(rows)) + " rows", flush=True)
         except Exception as e:
-            print("Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
+            print("  " + label + " Hour " + str(hr) + " SKIPPED: " + str(e), flush=True)
         time.sleep(10)
-    print("Done! " + str(len(all_rows)) + " total rows.", flush=True)
+    print(label + " done: " + str(len(all_rows)) + " rows", flush=True)
     return all_rows
 
 
-@app.route("/data/yesterday")
-def data_yesterday():
-    c = _cache["yesterday"]
-    if c["data"] is not None:
-        return jsonify(c["data"])
-    if c["fetching"]:
+@app.route("/data")
+def data():
+    # Return cached data instantly
+    if _cache["data"] is not None:
+        return jsonify(_cache["data"])
+
+    # Already fetching - tell browser to wait and poll
+    if _cache["fetching"]:
         return jsonify({"error": "still_loading"}), 503
-    c["fetching"] = True
+
+    # First request - fetch everything sequentially then cache
+    _cache["fetching"] = True
     try:
         now_pt    = datetime.now(tz=TZ_PT)
         yesterday = (now_pt - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        result    = fetch_hours("Yesterday RTM", yesterday, 24)
-        c["data"]     = result
-        c["fetching"] = False
+        today_pt  = now_pt.replace(hour=0, minute=0, second=0, microsecond=0)
+        hours_today = now_pt.hour
+
+        yest_rows  = fetch_hours("Yesterday", yesterday, 24)
+        today_rows = fetch_hours("Today", today_pt, hours_today)
+
+        result = {"yesterday": yest_rows, "today": today_rows}
+        _cache["data"]     = result
+        _cache["fetching"] = False
         return jsonify(result)
     except Exception:
-        c["fetching"] = False
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
-        return jsonify({"error": "fetch_failed"}), 500
-
-
-@app.route("/data/today")
-def data_today():
-    c = _cache["today"]
-    if c["data"] is not None:
-        return jsonify(c["data"])
-    if c["fetching"]:
-        return jsonify({"error": "still_loading"}), 503
-    c["fetching"] = True
-    try:
-        now_pt   = datetime.now(tz=TZ_PT)
-        today_pt = now_pt.replace(hour=0, minute=0, second=0, microsecond=0)
-        hours    = now_pt.hour
-        result   = fetch_hours("Today RTM", today_pt, hours)
-        c["data"]     = result
-        c["fetching"] = False
-        return jsonify(result)
-    except Exception:
-        c["fetching"] = False
+        _cache["fetching"] = False
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
         return jsonify({"error": "fetch_failed"}), 500
@@ -188,7 +172,7 @@ def dashboard():
     <h1>RTM 5-Min LMP - Today So Far | ELAP_PACE-APND</h1>
     <div class="meta" id="today-subtitle">Loading...</div>
   </div>
-  <div><button onclick="loadSection('today')" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
+  <div><button onclick="reload()" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
 </div>
 <div class="cards">
   <div class="card"><div class="label">Latest</div><div class="value" id="today-cLatest">-</div></div>
@@ -198,7 +182,7 @@ def dashboard():
   <div class="card"><div class="label">Hours</div><div class="value" id="today-cHours">-</div></div>
 </div>
 <div class="chart-wrap"><canvas id="today-chart" height="180"></canvas></div>
-<div class="table-wrap"><div id="today-table"><div class="status"><span class="spinner"></span> Fetching data from CAISO...</div></div></div>
+<div class="table-wrap"><div id="today-table"><div class="status"><span class="spinner"></span> Fetching data from CAISO... please wait (~6 min on first load).</div></div></div>
 
 <div class="divider"></div>
 
@@ -208,7 +192,6 @@ def dashboard():
     <h1>RTM 5-Min LMP - Yesterday | ELAP_PACE-APND</h1>
     <div class="meta" id="yesterday-subtitle">Loading...</div>
   </div>
-  <div><button onclick="loadSection('yesterday')" style="background:#fff;color:#1F4E79;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;">Refresh</button></div>
 </div>
 <div class="cards">
   <div class="card"><div class="label">High</div><div class="value pos" id="yesterday-cHigh">-</div></div>
@@ -218,11 +201,11 @@ def dashboard():
   <div class="card"><div class="label">Off-Peak Avg</div><div class="value" id="yesterday-cOffPeak">-</div></div>
 </div>
 <div class="chart-wrap"><canvas id="yesterday-chart" height="180"></canvas></div>
-<div class="table-wrap"><div id="yesterday-table"><div class="status"><span class="spinner"></span> Fetching data from CAISO...</div></div></div>
+<div class="table-wrap"><div id="yesterday-table"><div class="status"><span class="spinner"></span> Waiting for today's data to finish first...</div></div></div>
 
 <script>
-var charts = {};
-var polls  = {};
+var charts  = {};
+var pollTimer = null;
 
 function nowPT() {
   return new Date(new Date().toLocaleString("en-US", {timeZone:"America/Los_Angeles"}));
@@ -236,16 +219,13 @@ function ensureChart(cb) {
   document.head.appendChild(s);
 }
 
-function renderSection(day, allRows) {
-  var isToday = day === "today";
-  var prefix  = day;
-
-  if (!allRows || !allRows.length) {
+function renderSection(prefix, rows, isToday) {
+  if (!rows || !rows.length) {
     document.getElementById(prefix + "-table").innerHTML = '<div class="status">No data returned.</div>';
     return;
   }
 
-  var rows = allRows.map(function(r) {
+  var sorted = rows.map(function(r) {
     return {
       time:   r["INTERVALSTARTTIME_GMT"],
       hr:     parseFloat(r["OPR_HR"]),
@@ -255,9 +235,9 @@ function renderSection(day, allRows) {
     };
   }).sort(function(a,b) { return a.time < b.time ? -1 : 1; });
 
-  var lmps    = rows.map(function(r) { return r.lmp; });
-  var onPeak  = rows.filter(function(r) { return r.hr >= 7 && r.hr <= 22; }).map(function(r) { return r.lmp; });
-  var offPeak = rows.filter(function(r) { return r.hr < 7 || r.hr > 22; }).map(function(r) { return r.lmp; });
+  var lmps    = sorted.map(function(r) { return r.lmp; });
+  var onPeak  = sorted.filter(function(r) { return r.hr >= 7 && r.hr <= 22; }).map(function(r) { return r.lmp; });
+  var offPeak = sorted.filter(function(r) { return r.hr < 7 || r.hr > 22; }).map(function(r) { return r.lmp; });
   var sum     = function(a) { return a.reduce(function(x,y){return x+y;},0); };
 
   function setCard(id, v) {
@@ -272,7 +252,7 @@ function renderSection(day, allRows) {
 
   if (isToday) {
     setCard(prefix + "-cLatest", lmps[lmps.length - 1]);
-    document.getElementById(prefix + "-cHours").textContent = new Set(rows.map(function(r){return r.hr;})).size;
+    document.getElementById(prefix + "-cHours").textContent = new Set(sorted.map(function(r){return r.hr;})).size;
   } else {
     document.getElementById(prefix + "-cOnPeak").textContent  = onPeak.length  ? "$" + (sum(onPeak)/onPeak.length).toFixed(2)   : "-";
     document.getElementById(prefix + "-cOffPeak").textContent = offPeak.length ? "$" + (sum(offPeak)/offPeak.length).toFixed(2) : "-";
@@ -288,7 +268,7 @@ function renderSection(day, allRows) {
     var colors = lmps.map(function(v) { return v >= 0 ? "rgba(26,107,47,0.8)" : "rgba(185,28,28,0.8)"; });
     charts[prefix] = new Chart(document.getElementById(prefix + "-chart").getContext("2d"), {
       type: "bar",
-      data: { labels: rows.map(function(r){return r.timePT;}), datasets: [{ label: "LMP ($/MWh)", data: lmps, backgroundColor: colors, borderWidth: 0 }] },
+      data: { labels: sorted.map(function(r){return r.timePT;}), datasets: [{ label: "LMP ($/MWh)", data: lmps, backgroundColor: colors, borderWidth: 0 }] },
       options: {
         responsive: true,
         plugins: { legend: { display: false },
@@ -302,7 +282,7 @@ function renderSection(day, allRows) {
   });
 
   var byHr = {};
-  rows.forEach(function(r) { if (!byHr[r.hr]) byHr[r.hr]=[]; byHr[r.hr].push(r.lmp); });
+  sorted.forEach(function(r) { if (!byHr[r.hr]) byHr[r.hr]=[]; byHr[r.hr].push(r.lmp); });
   var tbl = '<table><thead><tr><th>Oper Hour</th><th>Avg ($/MWh)</th><th>Min</th><th>Max</th></tr></thead><tbody>';
   Object.keys(byHr).sort(function(a,b){return +a-+b;}).forEach(function(h) {
     var vals = byHr[h];
@@ -317,31 +297,30 @@ function renderSection(day, allRows) {
   document.getElementById(prefix + "-table").innerHTML = tbl;
 }
 
-function loadSection(day) {
-  if (polls[day]) { clearTimeout(polls[day]); polls[day] = null; }
-  document.getElementById(day + "-subtitle").textContent = "Fetching...";
+function reload() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  document.getElementById("today-subtitle").textContent = "Fetching...";
+  document.getElementById("yesterday-subtitle").textContent = "Waiting...";
 
-  fetch("/data/" + day)
+  fetch("/data")
     .then(function(resp) {
       return resp.json().then(function(d) { return {status: resp.status, data: d}; });
     })
     .then(function(result) {
       if (result.status === 503) {
-        document.getElementById(day + "-subtitle").textContent = "Fetching from CAISO... checking again in 15s";
-        polls[day] = setTimeout(function() { loadSection(day); }, 15000);
+        document.getElementById("today-subtitle").textContent = "Fetching from CAISO... checking again in 15s";
+        pollTimer = setTimeout(reload, 15000);
         return;
       }
-      renderSection(day, result.data);
+      renderSection("today",     result.data.today,     true);
+      renderSection("yesterday", result.data.yesterday, false);
     })
     .catch(function(e) {
-      document.getElementById(day + "-table").innerHTML = '<div class="status">Error: ' + e.message + ' <button onclick="loadSection(\'' + day + '\')">Retry</button></div>';
+      document.getElementById("today-table").innerHTML = '<div class="status">Error: ' + e.message + ' <button onclick="reload()">Retry</button></div>';
     });
 }
 
-document.addEventListener("DOMContentLoaded", function() {
-  loadSection("today");
-  loadSection("yesterday");
-});
+document.addEventListener("DOMContentLoaded", reload);
 </script>
 </body>
 </html>"""
