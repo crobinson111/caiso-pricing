@@ -327,10 +327,8 @@ function colorVal(id, v) {
 
 function loadSection(day, market) {
   var prefix = day + "-" + market;
-  var labelDay = day === "today" ? "today" : "yesterday";
   var refId = day === "today" ? ("today" + (market === "rtm" ? "Rtm" : "Hasp") + "Refreshed") : ("yest" + (market === "rtm" ? "Rtm" : "Hasp") + "Refreshed");
   var tableId = prefix + "-table";
-  var chartId = prefix + "-chart";
 
   document.getElementById(tableId).innerHTML = '<div class="status"><span class="spinner"></span> Fetching...</div>';
   document.getElementById(refId).textContent = "Refreshing...";
@@ -346,43 +344,7 @@ function loadSection(day, market) {
       return resp.json();
     })
     .then(function(allRows) {
-      if (!allRows || !allRows.length) {
-        document.getElementById(tableId).innerHTML = '<div class="status">No data available yet.</div>';
-        return;
-      }
-
-      var rows = allRows.map(function(r) {
-        return {
-          time: r["INTERVALSTARTTIME_GMT"],
-          hr: parseFloat(r["OPR_HR"]),
-          lmp: parseFloat(r["MW"]),
-          timePT: new Date(r["INTERVALSTARTTIME_GMT"]).toLocaleTimeString("en-US",
-            {hour:"2-digit", minute:"2-digit", timeZone:"America/Los_Angeles", hour12:false})
-        };
-      }).sort(function(a,b) { return a.time < b.time ? -1 : 1; });
-
-      var lmps    = rows.map(function(r) { return r.lmp; });
-      var onPeak  = rows.filter(function(r) { return r.hr >= 7 && r.hr <= 22; }).map(function(r) { return r.lmp; });
-      var offPeak = rows.filter(function(r) { return r.hr < 7 || r.hr > 22; }).map(function(r) { return r.lmp; });
-      var sum     = function(a) { return a.reduce(function(x,y){return x+y;},0); };
-
-      if (day === "today") {
-        colorVal(prefix + "-cLatest", lmps[lmps.length-1]);
-        document.getElementById(prefix + "-cHours").textContent = new Set(rows.map(function(r){return r.hr;})).size;
-      } else {
-        document.getElementById(prefix + "-cOnPeak").textContent  = onPeak.length  ? "$" + (sum(onPeak)/onPeak.length).toFixed(2)   : "-";
-        document.getElementById(prefix + "-cOffPeak").textContent = offPeak.length ? "$" + (sum(offPeak)/offPeak.length).toFixed(2) : "-";
-      }
-      colorVal(prefix + "-cHigh", Math.max.apply(null, lmps));
-      colorVal(prefix + "-cLow",  Math.min.apply(null, lmps));
-      document.getElementById(prefix + "-cAvg").textContent = "$" + (sum(lmps)/lmps.length).toFixed(2);
-
-      renderChart(chartId, rows.map(function(r){return r.timePT;}), lmps);
-      renderTable(tableId, rows);
-
-      var now = nowPT();
-      var d   = day === "today" ? now : new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
-      document.getElementById(refId).textContent = dateStr(d) + " | Refreshed: " + now.toLocaleTimeString("en-US",{timeZone:"America/Los_Angeles"}) + " PT";
+      if (allRows) renderSectionData(day, market, allRows);
     })
     .catch(function(e) {
       document.getElementById(tableId).innerHTML = '<div class="status">Error loading data: ' + e.message + '</div>';
@@ -390,10 +352,68 @@ function loadSection(day, market) {
 }
 
 function loadAll() {
-  loadSection('today', 'rtm');
+  // Yesterday loads immediately from cache
   loadSection('yesterday', 'rtm');
-  loadSection('today', 'hasp');
   loadSection('yesterday', 'hasp');
+  // Today sections run sequentially to avoid hammering CAISO simultaneously
+  fetch('/today/rtm')
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      renderSectionData('today', 'rtm', data);
+      return fetch('/today/hasp');
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      renderSectionData('today', 'hasp', data);
+    })
+    .catch(function(e) {
+      document.getElementById('today-rtm-table').innerHTML = '<div class="status">Error loading data: ' + e.message + '</div>';
+    });
+}
+
+function renderSectionData(day, market, allRows) {
+  var prefix = day + '-' + market;
+  var refId = day === 'today' ? ('today' + (market === 'rtm' ? 'Rtm' : 'Hasp') + 'Refreshed') : ('yest' + (market === 'rtm' ? 'Rtm' : 'Hasp') + 'Refreshed');
+  var tableId = prefix + '-table';
+  var chartId = prefix + '-chart';
+
+  if (!allRows || !allRows.length) {
+    document.getElementById(tableId).innerHTML = '<div class="status">No data available yet.</div>';
+    return;
+  }
+
+  var rows = allRows.map(function(r) {
+    return {
+      time: r["INTERVALSTARTTIME_GMT"],
+      hr: parseFloat(r["OPR_HR"]),
+      lmp: parseFloat(r["MW"]),
+      timePT: new Date(r["INTERVALSTARTTIME_GMT"]).toLocaleTimeString("en-US",
+        {hour:"2-digit", minute:"2-digit", timeZone:"America/Los_Angeles", hour12:false})
+    };
+  }).sort(function(a,b) { return a.time < b.time ? -1 : 1; });
+
+  var lmps    = rows.map(function(r) { return r.lmp; });
+  var onPeak  = rows.filter(function(r) { return r.hr >= 7 && r.hr <= 22; }).map(function(r) { return r.lmp; });
+  var offPeak = rows.filter(function(r) { return r.hr < 7 || r.hr > 22; }).map(function(r) { return r.lmp; });
+  var sum     = function(a) { return a.reduce(function(x,y){return x+y;},0); };
+
+  if (day === 'today') {
+    colorVal(prefix + '-cLatest', lmps[lmps.length-1]);
+    document.getElementById(prefix + '-cHours').textContent = new Set(rows.map(function(r){return r.hr;})).size;
+  } else {
+    document.getElementById(prefix + '-cOnPeak').textContent  = onPeak.length  ? '$' + (sum(onPeak)/onPeak.length).toFixed(2)   : '-';
+    document.getElementById(prefix + '-cOffPeak').textContent = offPeak.length ? '$' + (sum(offPeak)/offPeak.length).toFixed(2) : '-';
+  }
+  colorVal(prefix + '-cHigh', Math.max.apply(null, lmps));
+  colorVal(prefix + '-cLow',  Math.min.apply(null, lmps));
+  document.getElementById(prefix + '-cAvg').textContent = '$' + (sum(lmps)/lmps.length).toFixed(2);
+
+  renderChart(chartId, rows.map(function(r){return r.timePT;}), lmps);
+  renderTable(tableId, rows);
+
+  var now = nowPT();
+  var d   = day === 'today' ? now : new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
+  document.getElementById(refId).textContent = dateStr(d) + ' | Refreshed: ' + now.toLocaleTimeString('en-US',{timeZone:'America/Los_Angeles'}) + ' PT';
 }
 
 loadAll();
